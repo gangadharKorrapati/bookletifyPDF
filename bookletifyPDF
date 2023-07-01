@@ -1,0 +1,112 @@
+#!/bin/bash
+
+# Check if file name is provided
+if [ "$#" -ne 1 ]; then
+    echo "Usage: $0 filename.pdf"
+    exit 1
+fi
+
+# Input file
+input_file=$1
+
+# Base file name without extension
+base_name=$(basename "$input_file" .pdf)
+
+# Output directory
+output_dir="${base_name}_booklets"
+
+# Create output directory
+mkdir -p "$output_dir"
+
+# Get number of pages using pdfinfo
+num_pages=$(pdfinfo "$input_file" | grep Pages | awk '{print $2}')
+
+# Calculate remaining pages when divided by 180 (for 180-page parts)
+remainder_parts=$((num_pages % 180))
+
+# Calculate number of 180-page parts
+num_parts=$((num_pages / 180))
+
+# If there's a remainder, there will be an additional part
+if [ "$remainder_parts" -ne 0 ]; then
+    num_parts=$((num_parts + 1))
+fi
+
+# Function to get the minimum of two numbers
+min() {
+    printf "%d\n" "$1" "$2" | sort -n | head -n1
+}
+
+# Function to print progress
+print_progress() {
+    echo -ne "Progress: Part $1/$2, Booklet $3/$4\r"
+}
+
+# Loop over each part
+for (( part=1; part<=$num_parts; part++ ))
+do
+    # Calculate start and end pages for this part
+    start_part=$(( (part-1)*180 + 1 ))
+    end_part=$(min $((part*180)) $num_pages)
+
+    # Output file for this part
+    part_file="${output_dir}/${base_name}_part_${part}.pdf"
+
+    # Extract the pages for this part
+    pdfjam "$input_file" "${start_part}-${end_part}" --outfile "$part_file" >/dev/null 2>&1
+
+    # Calculate number of booklets for this part
+    part_pages=$((end_part - start_part + 1))
+    num_booklets=$((part_pages / 20))
+    remainder_booklets=$((part_pages % 20))
+
+    # If there's a remainder, there will be an additional booklet
+    if [ "$remainder_booklets" -ne 0 ]; then
+        num_booklets=$((num_booklets + 1))
+    fi
+
+    # Loop over each booklet within the part
+    for (( booklet=1; booklet<=num_booklets; booklet++ ))
+    do
+        print_progress "$part" "$num_parts" "$booklet" "$num_booklets"
+
+        # Calculate start and end pages for this booklet
+        start_page=$(( (booklet-1)*20 + 1 ))
+        end_page=$(min $((booklet*20)) $part_pages)
+
+        # Output file for this booklet
+        output_file="${output_dir}/${base_name}_part_${part}_booklet_${booklet}.pdf"
+
+        # Combine the pages and create the booklet
+        pdfjam "$part_file" "${start_page}-${end_page}" --outfile "$output_file" >/dev/null 2>&1
+
+        # Move the booklet file to a temporary file for pdfbook2
+        mv "$output_file" "${output_file}_temp.pdf"
+
+        # Rearrange the pages in booklet format
+        pdfbook2 --paper=letterpaper --no-crop "${output_file}_temp.pdf" >/dev/null 2>&1
+
+        # Move the formatted booklet back to the original output file
+        mv "${output_file}_temp-book.pdf" "$output_file"
+
+        # Remove temp files
+        rm "${output_file}_temp.pdf"
+    done
+
+    # Combine all the booklet files into a single PDF
+    pdfunite "${output_dir}/${base_name}_part_${part}_booklet_"* "${output_dir}/${base_name}_part_${part}_combined.pdf" >/dev/null 2>&1
+
+    # Remove the individual booklet files and the part file
+    rm "${output_dir}/${base_name}_part_${part}_booklet_"*
+    rm "$part_file"
+done
+
+print_progress "$num_parts" "$num_parts" "$num_booklets" "$num_booklets"
+echo ""
+
+# Combine all the combined part files into a single PDF
+pdfunite "${output_dir}/${base_name}_part_"*"_combined.pdf" "${base_name}_combined.pdf" >/dev/null 2>&1
+
+# Remove the combined part files
+rm "${output_dir}/${base_name}_part_"*"_combined.pdf"
+rm -dr $output_dir
